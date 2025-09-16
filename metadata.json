@@ -1,0 +1,8 @@
+{
+  "name": "Gemini Agent Assist",
+  "description": "A call center agent assistant dashboard that provides simulated call transcripts, summaries, sentiment analysis, and next-best actions powered by the Gemini API.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
