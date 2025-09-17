@@ -1,11 +1,12 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { TranscriptEntry, AnalysisResult, ProductRecommendation, AccidentClaimDetails } from './types';
-import { generateAgentResponse, analyzeConversation, recommendProductsForNewCaller, processAccidentClaim } from './services/geminiService';
+import { jsPDF } from 'jspdf';
+import { TranscriptEntry, AnalysisResult, ProductRecommendation, ClaimDocument } from './types';
+import { generateAgentResponse, analyzeConversation, recommendProductsForNewCaller, extractClaimDetails, checkClaimEligibility } from './services/geminiService';
 import CallSimulator from './components/CallSimulator';
 import TranscriptPanel from './components/TranscriptPanel';
 import AnalysisPanel from './components/AnalysisPanel';
 import SentimentPanel from './components/SentimentPanel';
-import { ClipboardListIcon, LightBulbIcon, SparklesIcon, DocumentTextIcon } from './components/icons';
+import { ClipboardListIcon, LightBulbIcon, SparklesIcon, DocumentTextIcon, DownloadIcon, PaperAirplaneIcon } from './components/icons';
 
 // FIX: Add necessary type definitions for the Web Speech API.
 // This avoids installing @types/dom-speech-recognition and fixes TypeScript errors.
@@ -71,30 +72,77 @@ const App: React.FC = () => {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [productRecommendations, setProductRecommendations] = useState<ProductRecommendation[]>([]);
-  const [accidentClaimDetails, setAccidentClaimDetails] = useState<AccidentClaimDetails | null>(null);
+  const [claimDocument, setClaimDocument] = useState<ClaimDocument | null>(null);
   const [isCallActive, setIsCallActive] = useState(false);
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecommending, setIsRecommending] = useState(false);
   const [isProcessingClaim, setIsProcessingClaim] = useState(false);
+  const [isClaimFiled, setIsClaimFiled] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [claimEligibility, setClaimEligibility] = useState({ isAccident: false, hasPolicyNumber: false });
+
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
 
-  const handleStartCall = useCallback(() => {
-    const initialAgentMessage: TranscriptEntry = {
-      speaker: 'Agent',
-      text: "Thank you for calling ABC General Insurance. My name is Alex. How can I help you today?",
-    };
-    setTranscript([initialAgentMessage]);
+  const handleStartCall = useCallback(async () => {
+    // Reset states for a new call
+    setTranscript([]);
     setAnalysis(null);
     setProductRecommendations([]);
-    setAccidentClaimDetails(null);
-    setIsCallActive(true);
+    setClaimDocument(null);
+    setIsClaimFiled(false);
+    setAudioUrl(null);
+    setClaimEligibility({ isAccident: false, hasPolicyNumber: false });
+    audioChunksRef.current = [];
+
+    try {
+      // Get user media and start recording the entire call
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      mediaStreamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStreamRef.current;
+      }
+
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const url = URL.createObjectURL(audioBlob);
+        setAudioUrl(url);
+      };
+
+      recorder.start();
+      setIsCallActive(true);
+
+      // Start the conversation
+      const initialAgentMessage: TranscriptEntry = {
+        speaker: 'Agent',
+        text: "Thank you for calling Hex General Insurance. My name is Alex. Please be aware that this call may be recorded for safety and quality purposes. How can I help you today?",
+      };
+      setTranscript([initialAgentMessage]);
+      const utterance = new SpeechSynthesisUtterance(initialAgentMessage.text);
+      window.speechSynthesis.speak(utterance);
+
+    } catch (error) {
+      console.error("Error accessing media devices.", error);
+      alert("Could not access camera and microphone. Please check permissions.");
+    }
   }, []);
 
   const handleUserMessage = useCallback(async (message: string) => {
@@ -109,6 +157,10 @@ const App: React.FC = () => {
         setIsAgentTyping(true);
         const agentResponseText = await generateAgentResponse(updatedTranscript);
         const agentMessage: TranscriptEntry = { speaker: 'Agent', text: agentResponseText };
+        
+        const utterance = new SpeechSynthesisUtterance(agentResponseText);
+        window.speechSynthesis.speak(utterance);
+
         setTranscript(prev => [...prev, agentMessage]);
         setIsAgentTyping(false);
       })();
@@ -120,98 +172,96 @@ const App: React.FC = () => {
   const handleStopRecording = useCallback(() => {
     if (recognitionRef.current) {
         recognitionRef.current.stop();
-        recognitionRef.current = null;
     }
-    if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(track => track.stop());
-        mediaStreamRef.current = null;
-    }
-     if (videoRef.current) {
-        videoRef.current.srcObject = null;
-    }
-    setIsRecording(false);
+  }, []);
 
-    if (interimTranscript.trim()) {
-        handleUserMessage(interimTranscript.trim());
-    }
-    setInterimTranscript('');
-  }, [interimTranscript, handleUserMessage]);
-
-  const handleStartRecording = useCallback(async () => {
+  const handleStartRecording = useCallback(() => {
     if (isRecording) {
         handleStopRecording();
         return;
     }
     
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        mediaStreamRef.current = stream;
-        if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-        }
-
-        const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognitionImpl) {
-            alert("Speech Recognition API is not supported in this browser.");
-            return;
-        }
-
-        const recognition = new SpeechRecognitionImpl();
-        recognitionRef.current = recognition;
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-
-        recognition.onstart = () => {
-            setIsRecording(true);
-        };
-
-        recognition.onresult = (event: SpeechRecognitionEvent) => {
-            let final = '';
-            let interim = '';
-            for (let i = event.resultIndex; i < event.results.length; ++i) {
-                if (event.results[i].isFinal) {
-                    final += event.results[i][0].transcript;
-                } else {
-                    interim += event.results[i][0].transcript;
-                }
-            }
-            setInterimTranscript(interim);
-            if (final) {
-                handleUserMessage(final.trim());
-                setInterimTranscript('');
-            }
-        };
-
-        recognition.onerror = (event) => {
-            console.error('Speech recognition error', event.error);
-            handleStopRecording();
-        };
-
-        recognition.onend = () => {
-            // onend can be triggered by stop() or by browser inactivity.
-            // Ensure we clean up if the recognition instance still exists.
-            if(recognitionRef.current) {
-                handleStopRecording();
-            }
-        };
-
-        recognition.start();
-
-    } catch (error) {
-        console.error("Error accessing media devices.", error);
-        alert("Could not access camera and microphone. Please check permissions.");
+    window.speechSynthesis.cancel();
+    
+    const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionImpl) {
+        alert("Speech Recognition API is not supported in this browser.");
+        return;
     }
-  }, [isRecording, handleStopRecording, handleUserMessage]);
+
+    const recognition = new SpeechRecognitionImpl();
+    recognitionRef.current = recognition;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+        setIsRecording(true);
+    };
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let final = '';
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+                final += event.results[i][0].transcript;
+            } else {
+                interim += event.results[i][0].transcript;
+            }
+        }
+        setInterimTranscript(interim);
+        if (final) {
+            handleUserMessage(final.trim());
+            setInterimTranscript('');
+        }
+    };
+
+    recognition.onerror = (event) => {
+        console.error('Speech recognition error', event.error);
+    };
+
+    recognition.onend = () => {
+         setIsRecording(false);
+         if (interimTranscript.trim()) {
+            handleUserMessage(interimTranscript.trim());
+        }
+        setInterimTranscript('');
+        recognitionRef.current = null;
+    };
+
+    recognition.start();
+
+  }, [isRecording, handleStopRecording, handleUserMessage, interimTranscript]);
 
   const handleEndCall = useCallback(async () => {
     setIsCallActive(false);
+    window.speechSynthesis.cancel();
+    
     if (isRecording) {
         handleStopRecording();
     }
+    
+    // Stop the main call recording
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+    }
+    
+    // Clean up media stream
+    if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+        mediaStreamRef.current = null;
+    }
+    if (videoRef.current) {
+        videoRef.current.srcObject = null;
+    }
+
     setIsAnalyzing(true);
-    const result = await analyzeConversation(transcript);
-    setAnalysis(result);
+    const [analysisResult, eligibilityResult] = await Promise.all([
+      analyzeConversation(transcript),
+      checkClaimEligibility(transcript)
+    ]);
+    setAnalysis(analysisResult);
+    setClaimEligibility(eligibilityResult);
     setIsAnalyzing(false);
   }, [transcript, isRecording, handleStopRecording]);
 
@@ -227,18 +277,88 @@ const App: React.FC = () => {
     setIsRecommending(false);
   }, [transcript]);
   
-  const handleProcessAccidentClaim = useCallback(async () => {
+  const handleProcessClaim = useCallback(async () => {
     if (transcript.length < 2) return;
+    setIsClaimFiled(false);
     setIsProcessingClaim(true);
-    const result = await processAccidentClaim(transcript);
-    setAccidentClaimDetails(result);
+    const result = await extractClaimDetails(transcript);
+    setClaimDocument(result);
     setIsProcessingClaim(false);
   }, [transcript]);
+
+  const handleFileClaim = useCallback(() => {
+    setIsClaimFiled(true);
+    // In a real application, this would trigger an API call to a backend system.
+  }, []);
+
+  const handleDownloadClaimDocument = useCallback(() => {
+    if (!claimDocument) return;
+    const doc = new jsPDF();
+
+    doc.setFontSize(18);
+    doc.text(`Claim Document: ${claimDocument.claimId || 'N/A'}`, 14, 22);
+
+    doc.setFontSize(12);
+    let yPos = 40;
+
+    const addLine = (label: string, value: string | null) => {
+      if (yPos > 270) { // Add new page if content overflows
+        doc.addPage();
+        yPos = 20;
+      }
+      doc.setFont("helvetica", "bold");
+      doc.text(`${label}:`, 14, yPos);
+      doc.setFont("helvetica", "normal");
+      
+      const formattedValue = value ?? 'Not mentioned';
+      const splitText = doc.splitTextToSize(formattedValue, 120);
+      doc.text(splitText, 70, yPos);
+      yPos += (splitText.length * 5) + 5;
+    };
+
+    addLine('Policyholder Name', claimDocument.policyholderName);
+    addLine('Policy Number', claimDocument.policyNumber);
+    addLine('Claim Status', claimDocument.claimStatus);
+    addLine('Date of Accident', claimDocument.accidentDate);
+    
+    yPos += 5; // Add some space before the next section
+    doc.setFont("helvetica", "bold");
+    doc.text("Vehicle Details", 14, yPos);
+    yPos += 7;
+    addLine('Registration No.', claimDocument.vehicleRegistration);
+    addLine('Make', claimDocument.vehicleMake);
+    addLine('Model', claimDocument.vehicleModel);
+    
+    yPos += 5;
+    doc.setFont("helvetica", "bold");
+    doc.text("Incident Details", 14, yPos);
+    yPos += 7;
+    addLine('Description', claimDocument.incidentDescription);
+
+    yPos += 5;
+    doc.setFont("helvetica", "bold");
+    doc.text("Repair & Servicing", 14, yPos);
+    yPos += 7;
+    addLine('Assigned Repair Shop', claimDocument.assignedRepairShop);
+
+    doc.save(`claim-document-${claimDocument.claimId || 'new'}.pdf`);
+  }, [claimDocument]);
+  
+  const FormRow: React.FC<{ label: string, value: string | null }> = ({ label, value }) => (
+    <div>
+        <label className="block text-sm font-medium text-text-secondary mb-1">
+            {label}
+        </label>
+        <div className="w-full bg-surface-input rounded-md p-3 text-text-primary border border-gray-600 min-h-[2.5rem] flex items-center">
+            {value ?? <span className="italic text-gray-400">Not mentioned</span>}
+        </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-surface-main text-text-primary font-sans">
       <header className="bg-surface-card/50 backdrop-blur-sm border-b border-gray-700 p-4">
-        <h1 className="text-2xl font-bold text-center text-text-primary">Gemini Agent Assist</h1>
+        <h1 className="text-2xl font-bold text-center text-text-primary">Hex Agent Assist for Customer Care</h1>
       </header>
       <main className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-5 gap-8">
         {/* Left Column: Call Simulation */}
@@ -260,6 +380,7 @@ const App: React.FC = () => {
             onStartRecording={handleStartRecording}
             onStopRecording={handleStopRecording}
             videoRef={videoRef}
+            audioUrl={audioUrl}
           />
         </div>
 
@@ -306,27 +427,85 @@ const App: React.FC = () => {
               icon={<DocumentTextIcon className="w-7 h-7 text-text-secondary" />}
               isLoading={isProcessingClaim}
             >
-              {accidentClaimDetails ? (
-                <dl className="space-y-3 text-sm">
-                  {Object.entries(accidentClaimDetails).map(([key, value]) => (
-                    <div key={key} className="grid grid-cols-3 gap-2 bg-surface-input p-2 rounded-md">
-                      <dt className="font-semibold text-text-primary capitalize col-span-1">{key.replace(/([A-Z])/g, ' $1')}</dt>
-                      <dd className="text-text-secondary col-span-2">{Array.isArray(value) ? value.join(', ') : (value ?? <span className="italic">Not mentioned</span>)}</dd>
+              {claimDocument ? (
+                <div>
+                  <div className="space-y-4">
+                    <div className="p-4 border border-gray-600 rounded-lg">
+                        <h3 className="text-lg font-semibold text-text-accent mb-4">
+                            Claim Document: {claimDocument.claimId}
+                        </h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <FormRow label="Policyholder Name" value={claimDocument.policyholderName} />
+                            <FormRow label="Policy Number" value={claimDocument.policyNumber} />
+                            <FormRow label="Claim Status" value={claimDocument.claimStatus} />
+                            <FormRow label="Date of Accident" value={claimDocument.accidentDate} />
+                        </div>
                     </div>
-                  ))}
-                </dl>
+                     <div className="p-4 border border-gray-600 rounded-lg">
+                        <h3 className="text-lg font-semibold text-text-accent mb-4">Vehicle Details</h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                             <FormRow label="Registration No." value={claimDocument.vehicleRegistration} />
+                             <FormRow label="Make" value={claimDocument.vehicleMake} />
+                             <FormRow label="Model" value={claimDocument.vehicleModel} />
+                        </div>
+                    </div>
+                     <div className="p-4 border border-gray-600 rounded-lg">
+                        <h3 className="text-lg font-semibold text-text-accent mb-4">Incident & Repair</h3>
+                         <FormRow label="Incident Description" value={claimDocument.incidentDescription} />
+                         <div className="mt-4">
+                            <FormRow label="Assigned Repair Shop" value={claimDocument.assignedRepairShop} />
+                         </div>
+                    </div>
+                  </div>
+                  <div className="mt-6">
+                    {isClaimFiled ? (
+                      <div className="text-center">
+                        <p className="text-green-400 font-bold mb-4">Claim Filed Successfully!</p>
+                        <button
+                          onClick={handleDownloadClaimDocument}
+                          className="w-full flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200"
+                        >
+                          <DownloadIcon className="w-5 h-5 mr-2" />
+                          Download Claim Document
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col sm:flex-row gap-4">
+                        <button
+                          onClick={handleFileClaim}
+                          className="flex-1 flex items-center justify-center bg-brand-secondary hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200"
+                        >
+                          <PaperAirplaneIcon className="w-5 h-5 mr-2" />
+                          File Claim
+                        </button>
+                        <button
+                          onClick={handleDownloadClaimDocument}
+                          className="flex-1 flex items-center justify-center bg-surface-input hover:bg-gray-600 text-text-secondary font-bold py-2 px-4 rounded-lg transition-colors duration-200"
+                        >
+                          <DownloadIcon className="w-5 h-5 mr-2" />
+                          Download Claim Document
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-center">
                   <p className="text-text-secondary mb-4">
-                    Extract key details from the conversation to pre-fill an accident claim report.
+                    Extract and pre-fill accident claim details from the conversation.
                   </p>
                   <button
-                    onClick={handleProcessAccidentClaim}
-                    disabled={!isCallActive || transcript.length < 2 || isProcessingClaim || isAnalyzing}
+                    onClick={handleProcessClaim}
+                    disabled={isCallActive || !claimEligibility.isAccident || !claimEligibility.hasPolicyNumber}
                     className="bg-brand-secondary hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 disabled:bg-gray-600 disabled:cursor-not-allowed"
                   >
                     Process Accident Claim
                   </button>
+                  {!isCallActive && transcript.length > 1 && (!claimEligibility.isAccident || !claimEligibility.hasPolicyNumber) && (
+                      <p className="text-xs text-yellow-400 mt-2 max-w-xs">
+                          Button is disabled because the conversation is not recognized as an accident report or a policy number was not provided.
+                      </p>
+                  )}
                 </div>
               )}
             </AnalysisPanel>

@@ -18,13 +18,15 @@ export interface ProductRecommendation {
   reasoning: string;
 }
 
-export interface AccidentClaimDetails {
+export interface ClaimDocument {
+  claimId: string | null;
   policyholderName: string | null;
   policyNumber: string | null;
+  claimStatus: string | null;
   accidentDate: string | null;
-  accidentLocation: string | null;
+  vehicleRegistration: string | null;
+  vehicleMake: string | null;
+  vehicleModel: string | null;
   incidentDescription: string | null;
-  vehiclesInvolved: string[] | null;
-  injuriesReported: string | null;
-  policeReportFiled: string | null;
+  assignedRepairShop: string | null;
 }

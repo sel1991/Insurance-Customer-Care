@@ -1,6 +1,5 @@
-
 import React from 'react';
-import { MicrophoneIcon, PhoneIcon, StopIcon } from './icons';
+import { MicrophoneIcon, PhoneIcon, StopIcon, DownloadIcon } from './icons';
 
 interface CallSimulatorProps {
   isCallActive: boolean;
@@ -11,6 +10,7 @@ interface CallSimulatorProps {
   onStartRecording: () => void;
   onStopRecording: () => void;
   videoRef: React.RefObject<HTMLVideoElement>;
+  audioUrl: string | null;
 }
 
 const CallSimulator: React.FC<CallSimulatorProps> = ({
@@ -22,6 +22,7 @@ const CallSimulator: React.FC<CallSimulatorProps> = ({
   onStartRecording,
   onStopRecording,
   videoRef,
+  audioUrl,
 }) => {
   if (!isCallActive) {
     return (
@@ -31,8 +32,20 @@ const CallSimulator: React.FC<CallSimulatorProps> = ({
           className="w-full flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition-colors duration-200"
         >
           <PhoneIcon className="w-6 h-6 mr-2" />
-          Start Call
+          {audioUrl ? 'Start New Call' : 'Start Call'}
         </button>
+        {audioUrl && (
+          <div className="mt-4">
+            <a
+              href={audioUrl}
+              download="call-recording.webm"
+              className="w-full flex items-center justify-center bg-surface-input hover:bg-gray-600 text-text-secondary font-bold py-3 px-4 rounded-lg transition-colors duration-200"
+            >
+              <DownloadIcon className="w-6 h-6 mr-2" />
+              Download Recording
+            </a>
+          </div>
+        )}
       </div>
     );
   }
