@@ -1,12 +1,14 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { jsPDF } from 'jspdf';
-import { TranscriptEntry, AnalysisResult, ProductRecommendation, ClaimDocument } from './types';
-import { generateAgentResponse, analyzeConversation, recommendProductsForNewCaller, extractClaimDetails, checkClaimEligibility } from './services/geminiService';
+import { TranscriptEntry, AnalysisResult, ProductRecommendation, ClaimDocument, QuoteEligibility, QuoteDetails } from './types';
+import { generateAgentResponse, analyzeConversation, recommendProductsForNewCaller, extractClaimDetails, checkClaimEligibility, checkQuoteEligibility, generateQuote } from './services/geminiService';
 import CallSimulator from './components/CallSimulator';
 import TranscriptPanel from './components/TranscriptPanel';
 import AnalysisPanel from './components/AnalysisPanel';
 import SentimentPanel from './components/SentimentPanel';
-import { ClipboardListIcon, LightBulbIcon, SparklesIcon, DocumentTextIcon, DownloadIcon, PaperAirplaneIcon } from './components/icons';
+import NotesPanel from './components/NotesPanel';
+import QuotePanel from './components/QuotePanel';
+import { ClipboardListIcon, LightBulbIcon, SparklesIcon, DocumentTextIcon, DownloadIcon, PaperAirplaneIcon, PencilIcon, CurrencyDollarIcon } from './components/icons';
 
 // FIX: Add necessary type definitions for the Web Speech API.
 // This avoids installing @types/dom-speech-recognition and fixes TypeScript errors.
@@ -73,16 +75,20 @@ const App: React.FC = () => {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [productRecommendations, setProductRecommendations] = useState<ProductRecommendation[]>([]);
   const [claimDocument, setClaimDocument] = useState<ClaimDocument | null>(null);
+  const [quoteDetails, setQuoteDetails] = useState<QuoteDetails | null>(null);
   const [isCallActive, setIsCallActive] = useState(false);
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecommending, setIsRecommending] = useState(false);
   const [isProcessingClaim, setIsProcessingClaim] = useState(false);
+  const [isGeneratingQuote, setIsGeneratingQuote] = useState(false);
   const [isClaimFiled, setIsClaimFiled] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [claimEligibility, setClaimEligibility] = useState({ isAccident: false, hasPolicyNumber: false });
+  const [quoteEligibility, setQuoteEligibility] = useState<QuoteEligibility>({ hasName: false, hasDob: false, hasTenure: false });
+  const [manualNotes, setManualNotes] = useState<string>('');
 
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -98,9 +104,12 @@ const App: React.FC = () => {
     setAnalysis(null);
     setProductRecommendations([]);
     setClaimDocument(null);
+    setQuoteDetails(null);
     setIsClaimFiled(false);
     setAudioUrl(null);
     setClaimEligibility({ isAccident: false, hasPolicyNumber: false });
+    setQuoteEligibility({ hasName: false, hasDob: false, hasTenure: false });
+    setManualNotes('');
     audioChunksRef.current = [];
 
     try {
@@ -256,14 +265,17 @@ const App: React.FC = () => {
     }
 
     setIsAnalyzing(true);
-    const [analysisResult, eligibilityResult] = await Promise.all([
-      analyzeConversation(transcript),
-      checkClaimEligibility(transcript)
+    setQuoteDetails(null);
+    const [analysisResult, eligibilityResult, quoteEligibilityResult] = await Promise.all([
+      analyzeConversation(transcript, manualNotes),
+      checkClaimEligibility(transcript),
+      checkQuoteEligibility(transcript)
     ]);
     setAnalysis(analysisResult);
     setClaimEligibility(eligibilityResult);
+    setQuoteEligibility(quoteEligibilityResult);
     setIsAnalyzing(false);
-  }, [transcript, isRecording, handleStopRecording]);
+  }, [transcript, isRecording, handleStopRecording, manualNotes]);
 
   const handleDetectAndRecommend = useCallback(async () => {
     if (transcript.length < 2) {
@@ -344,6 +356,71 @@ const App: React.FC = () => {
     doc.save(`claim-document-${claimDocument.claimId || 'new'}.pdf`);
   }, [claimDocument]);
   
+    const handleGenerateQuote = useCallback(async () => {
+        if (transcript.length < 2) return;
+        setIsGeneratingQuote(true);
+        try {
+            const result = await generateQuote(transcript);
+            setQuoteDetails(result);
+        } catch (error) {
+            console.error("Failed to generate quote", error);
+            // Optionally, set some error state to show in the UI
+        }
+        setIsGeneratingQuote(false);
+    }, [transcript]);
+
+    const handleDownloadQuote = useCallback(() => {
+        if (!quoteDetails) return;
+        const doc = new jsPDF();
+
+        doc.setFontSize(18);
+        doc.text(`Insurance Quote: ${quoteDetails.quoteId}`, 14, 22);
+        doc.setFontSize(12);
+        doc.text(`Policy Type: ${quoteDetails.policyType}`, 14, 30);
+
+
+        let yPos = 45;
+        const addLine = (label: string, value: string | number | null) => {
+            if (yPos > 270) {
+                doc.addPage();
+                yPos = 20;
+            }
+            doc.setFont("helvetica", "bold");
+            doc.text(`${label}:`, 14, yPos);
+            doc.setFont("helvetica", "normal");
+            doc.text(String(value ?? 'N/A'), 70, yPos);
+            yPos += 8;
+        };
+
+        doc.setFontSize(14);
+        doc.text("Customer Information", 14, yPos);
+        yPos += 8;
+        doc.setFontSize(12);
+        addLine('Customer Name', quoteDetails.customerName);
+        addLine('Date of Birth', quoteDetails.dateOfBirth);
+        addLine('Policy Tenure', quoteDetails.tenure);
+
+        yPos += 8;
+        doc.setFontSize(14);
+        doc.text("Premium Details", 14, yPos);
+        yPos += 8;
+        doc.setFontSize(12);
+        addLine('Monthly Premium', `$${quoteDetails.monthlyPremium.toFixed(2)}`);
+        addLine('Annual Premium', `$${quoteDetails.annualPremium.toFixed(2)}`);
+
+        yPos += 8;
+        doc.setFontSize(14);
+        doc.text("Coverage Details", 14, yPos);
+        yPos += 8;
+        doc.setFontSize(12);
+        addLine('Liability', quoteDetails.coverageDetails.liability);
+        addLine('Collision', quoteDetails.coverageDetails.collision);
+        addLine('Comprehensive', quoteDetails.coverageDetails.comprehensive);
+
+
+        doc.save(`quote-${quoteDetails.quoteId}.pdf`);
+    }, [quoteDetails]);
+
   const FormRow: React.FC<{ label: string, value: string | null }> = ({ label, value }) => (
     <div>
         <label className="block text-sm font-medium text-text-secondary mb-1">
@@ -385,8 +462,8 @@ const App: React.FC = () => {
         </div>
 
         {/* Right Column: Agent Assist Dashboard */}
-        <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-2 gap-8 h-[85vh] overflow-y-auto pr-2">
-          <div className="md:col-span-2">
+        <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-8 h-[85vh] overflow-y-auto pr-2">
+          <div className="md:col-span-3">
             <AnalysisPanel
               title="Call Summary"
               icon={<ClipboardListIcon className="w-7 h-7 text-text-secondary" />}
@@ -421,7 +498,14 @@ const App: React.FC = () => {
               )}
             </AnalysisPanel>
           </div>
-           <div className="md:col-span-2">
+          <div className="md:col-span-1">
+            <NotesPanel
+                notes={manualNotes}
+                onNotesChange={setManualNotes}
+                isCallActive={isCallActive}
+            />
+          </div>
+           <div className="md:col-span-3">
             <AnalysisPanel
               title="Claim Assistant"
               icon={<DocumentTextIcon className="w-7 h-7 text-text-secondary" />}
@@ -510,7 +594,7 @@ const App: React.FC = () => {
               )}
             </AnalysisPanel>
           </div>
-          <div className="md:col-span-2">
+          <div className="md:col-span-3">
             <AnalysisPanel
               title="Product Recommendations"
               icon={<SparklesIcon className="w-7 h-7 text-text-secondary" />}
@@ -540,6 +624,16 @@ const App: React.FC = () => {
                 </div>
               )}
             </AnalysisPanel>
+          </div>
+           <div className="md:col-span-3">
+              <QuotePanel
+                  eligibility={quoteEligibility}
+                  quote={quoteDetails}
+                  isGenerating={isGeneratingQuote}
+                  onGenerateQuote={handleGenerateQuote}
+                  onDownloadQuote={handleDownloadQuote}
+                  isCallActive={isCallActive}
+              />
           </div>
         </div>
       </main>

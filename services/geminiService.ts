@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { TranscriptEntry, AnalysisResult, Sentiment, ProductRecommendation, ClaimDocument } from '../types';
+import { TranscriptEntry, AnalysisResult, Sentiment, ProductRecommendation, ClaimDocument, QuoteEligibility, QuoteDetails } from '../types';
 
 if (!process.env.API_KEY) {
   throw new Error("API_KEY environment variable not set");
@@ -52,6 +52,13 @@ export const generateAgentResponse = async (transcript: TranscriptEntry[]): Prom
 - **CRITICAL INSTRUCTION: Your response MUST be concise and professional. Strictly limit your response to under 200 words. Do NOT be verbose or repetitive.**
 - Do not repeat what the customer just said.
 - Continue the conversation naturally based on the transcript.
+
+**Quoting Flow for New Customers:**
+- If a new customer is asking for a quote and has provided their full name, date of birth, and desired policy tenure, your goal is to conclude the information-gathering part of the conversation.
+- **Do not** put them on hold or transfer them to a specialist.
+- **Instead, inform them that you have all the necessary details and that a formal quote will be generated and emailed to them shortly.**
+- You can then ask if there is anything else you can help them with to gracefully end the call or continue with other queries.
+- Example response: "Thank you for providing all the details. I have everything I need now. We will generate a formal quote and email it to you shortly. Is there anything else I can assist you with today?"
 `;
     
     const prompt = `Current Conversation:
@@ -78,7 +85,7 @@ Agent:`;
   }
 };
 
-export const analyzeConversation = async (transcript: TranscriptEntry[]): Promise<AnalysisResult> => {
+export const analyzeConversation = async (transcript: TranscriptEntry[], manualNotes?: string): Promise<AnalysisResult> => {
     if (transcript.length === 0) {
         return {
             summary: "No conversation to analyze.",
@@ -88,10 +95,15 @@ export const analyzeConversation = async (transcript: TranscriptEntry[]): Promis
     }
   try {
     const model = 'gemini-2.5-flash';
-    const prompt = `Analyze the following call center conversation transcript for an insurance company. Provide a concise summary (2-3 sentences), determine the overall customer sentiment, and suggest 3 concrete next-best actions for the agent.
+    const notesSection = manualNotes && manualNotes.trim()
+      ? `\n\nAgent's Manual Notes (for additional context):\n${manualNotes}`
+      : '';
+
+    const prompt = `Analyze the following call center conversation transcript and the agent's notes. Provide a concise summary (2-3 sentences) that incorporates insights from both the transcript and the notes. Determine the overall customer sentiment, and suggest 3 concrete next-best actions for the agent.
 
 Transcript:
 ${formatTranscript(transcript)}
+${notesSection}
 `;
 
     const response = await ai.models.generateContent({
@@ -104,7 +116,7 @@ ${formatTranscript(transcript)}
           properties: {
             summary: {
               type: Type.STRING,
-              description: 'A concise summary of the entire conversation in 2-3 sentences.'
+              description: 'A concise summary of the entire conversation in 2-3 sentences, incorporating insights from the agent\'s notes if provided.'
             },
             sentiment: {
               type: Type.STRING,
@@ -309,5 +321,104 @@ ${formatTranscript(transcript)}
   } catch (error) {
     console.error("Error checking claim eligibility:", error);
     return { isAccident: false, hasPolicyNumber: false };
+  }
+};
+
+export const checkQuoteEligibility = async (transcript: TranscriptEntry[]): Promise<QuoteEligibility> => {
+  const defaultEligibility = { hasName: false, hasDob: false, hasTenure: false };
+  if (transcript.length < 2) {
+    return defaultEligibility;
+  }
+  try {
+    const model = 'gemini-2.5-flash';
+    const prompt = `Analyze the following conversation transcript. Determine if the customer has provided the following three pieces of information:
+1.  Their full name.
+2.  Their date of birth.
+3.  A desired policy tenure (e.g., "1 year", "12 months", "annual").
+
+Respond in JSON format with boolean flags for each item.
+
+Transcript:
+${formatTranscript(transcript)}
+`;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            hasName: { type: Type.BOOLEAN, description: "True if the customer has stated their full name." },
+            hasDob: { type: Type.BOOLEAN, description: "True if the customer has stated their date of birth." },
+            hasTenure: { type: Type.BOOLEAN, description: "True if the customer has mentioned a desired policy tenure." }
+          },
+          required: ['hasName', 'hasDob', 'hasTenure']
+        }
+      }
+    });
+    const jsonText = response.text.trim();
+    return JSON.parse(jsonText);
+
+  } catch (error) {
+    console.error("Error checking quote eligibility:", error);
+    return defaultEligibility;
+  }
+};
+
+
+export const generateQuote = async (transcript: TranscriptEntry[]): Promise<QuoteDetails> => {
+  try {
+    const model = 'gemini-2.5-flash';
+    const prompt = `You are a quoting specialist for 'Hex General Insurance'. Your task is to analyze the following call transcript and generate an auto insurance quote for the 'AutoGuard Plus' policy.
+
+**Instructions:**
+1.  Extract the customer's full name and date of birth from the transcript.
+2.  Extract the desired policy tenure (e.g., 1 year).
+3.  Generate a plausible, fictional Quote ID (e.g., Q-HEX- followed by 6 random digits).
+4.  Calculate plausible monthly and annual premiums. Assume a standard risk profile for a customer in their 30s.
+5.  Provide standard coverage details for liability, collision, and comprehensive insurance, including typical limits and deductibles.
+
+Transcript:
+${formatTranscript(transcript)}
+`;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            quoteId: { type: Type.STRING, description: "A generated unique ID for the quote (e.g., Q-HEX-123456)." },
+            customerName: { type: Type.STRING, description: "The full name of the customer." },
+            dateOfBirth: { type: Type.STRING, description: "The customer's date of birth." },
+            policyType: { type: Type.STRING, description: "The type of policy, which should be 'AutoGuard Plus'." },
+            tenure: { type: Type.STRING, description: "The desired policy tenure." },
+            monthlyPremium: { type: Type.NUMBER, description: "A plausible monthly premium amount." },
+            annualPremium: { type: Type.NUMBER, description: "A plausible annual premium amount." },
+            coverageDetails: {
+              type: Type.OBJECT,
+              properties: {
+                liability: { type: Type.STRING, description: "Details of liability coverage (e.g., '$100k/$300k/$50k')." },
+                collision: { type: Type.STRING, description: "Details of collision coverage (e.g., '$500 Deductible')." },
+                comprehensive: { type: Type.STRING, description: "Details of comprehensive coverage (e.g., '$500 Deductible')." }
+              },
+              required: ['liability', 'collision', 'comprehensive']
+            }
+          },
+          required: ['quoteId', 'customerName', 'dateOfBirth', 'policyType', 'tenure', 'monthlyPremium', 'annualPremium', 'coverageDetails']
+        }
+      }
+    });
+
+    const jsonText = response.text.trim();
+    return JSON.parse(jsonText) as QuoteDetails;
+
+  } catch (error) {
+    console.error("Error generating quote:", error);
+    throw new Error("Failed to generate quote due to an API error.");
   }
 };

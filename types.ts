@@ -30,3 +30,24 @@ export interface ClaimDocument {
   incidentDescription: string | null;
   assignedRepairShop: string | null;
 }
+
+export interface QuoteEligibility {
+  hasName: boolean;
+  hasDob: boolean;
+  hasTenure: boolean;
+}
+
+export interface QuoteDetails {
+  quoteId: string;
+  customerName: string;
+  dateOfBirth: string;
+  policyType: string;
+  tenure: string;
+  monthlyPremium: number;
+  annualPremium: number;
+  coverageDetails: {
+    liability: string;
+    collision: string;
+    comprehensive: string;
+  };
+}
